@@ -1,7 +1,7 @@
 [project]
 name = "comfyui-fl-path-animator"
 description = "Interactive path animator with visual editor for creating animated shapes that follow user-drawn paths. WAN ATI compatible for stable video generation."
-version = "1.0.2"
+version = "1.0.3"
 license = { file = "LICENSE.txt" }
 dependencies = [
     "Pillow>=9.0.0",
