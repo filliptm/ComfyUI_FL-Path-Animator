@@ -25,7 +25,7 @@ def parse_color(color):
                 return (255, 255, 255)
     return color
 
-class FL_PathAnimatorV2:
+class FL_PathAnimator:
 
     RETURN_TYPES = ("IMAGE", "MASK", "STRING",)
     RETURN_NAMES = ("image", "mask", "coordinates",)
