@@ -25,7 +25,7 @@ def parse_color(color):
                 return (255, 255, 255)
     return color
 
-def apply_interpolation(t, interpolation_type='linear'):
+def apply_interpolation(t, interpolation_type='linear', bezier_points=None):
     """Apply interpolation easing function to parameter t (0.0 to 1.0)"""
     if interpolation_type == 'ease-in':
         # Quadratic ease in
@@ -39,20 +39,73 @@ def apply_interpolation(t, interpolation_type='linear'):
             return 2 * t * t
         else:
             return -1 + (4 - 2 * t) * t
+    elif interpolation_type == 'custom':
+        # Cubic bezier interpolation
+        # Points are (0,0), (x1,y1), (x2,y2), (1,1)
+        if not bezier_points or len(bezier_points) != 4:
+            return t
+            
+        x1, y1, x2, y2 = bezier_points
+        return solve_cubic_bezier(t, x1, y1, x2, y2)
     else:
         # Linear (default)
         return t
 
+def solve_cubic_bezier(x, x1, y1, x2, y2):
+    """
+    Solve cubic bezier for a given x (time) to find y (progress).
+    This is equivalent to CSS cubic-bezier().
+    Since x is monotonic, we can solve for t where Bx(t) = x, then return By(t).
+    Using Newton-Raphson to solve for t.
+    """
+    if x <= 0: return 0.0
+    if x >= 1: return 1.0
+    
+    # Initial guess t = x
+    t = x
+    
+    # Newton's method
+    for i in range(8):
+        # Calculate x(t) and its derivative x'(t)
+        # B(t) = (1-t)^3*P0 + 3(1-t)^2*t*P1 + 3(1-t)*t^2*P2 + t^3*P3
+        # P0=(0,0), P1=(x1,y1), P2=(x2,y2), P3=(1,1)
+        
+        # Coefficients for x(t) = at^3 + bt^2 + ct
+        cx = 3.0 * x1
+        bx = 3.0 * (x2 - x1) - cx
+        ax = 1.0 - cx - bx
+        
+        current_x = ((ax * t + bx) * t + cx) * t
+        
+        if abs(current_x - x) < 1e-5:
+            break
+            
+        derivative_x = (3.0 * ax * t + 2.0 * bx) * t + cx
+        
+        if abs(derivative_x) < 1e-5:
+            break
+            
+        t -= (current_x - x) / derivative_x
+        t = max(0.0, min(1.0, t))
+    
+    # Calculate y(t)
+    cy = 3.0 * y1
+    by = 3.0 * (y2 - y1) - cy
+    ay = 1.0 - cy - by
+    
+    return ((ay * t + by) * t + cy) * t
+
 class FL_PathAnimator:
 
-    RETURN_TYPES = ("IMAGE", "MASK", "STRING",)
-    RETURN_NAMES = ("image", "mask", "coordinates",)
+    RETURN_TYPES = ("IMAGE", "MASK", "STRING", "STRING", "STRING", "STRING", "STRING",)
+    RETURN_NAMES = ("image", "mask", "coordinates", "coordinates_part1", "coordinates_part2", "coordinates_part1_reversed", "coordinates_part2_reversed",)
     FUNCTION = "animate_paths"
     CATEGORY = "🎨 FL Path Animator"
     DESCRIPTION = """
 Creates animated shapes that follow user-drawn paths.
 Open the path editor to draw trajectories on a reference image, then shapes will follow these paths over time.
 Outputs WAN ATI-compatible coordinate strings with proper 121-point resampling for stable video generation.
+Enable 'split_output' to slice the coordinate list into two parts at the position defined by 'split_point'.
 """
 
     @classmethod
@@ -78,6 +131,8 @@ Outputs WAN ATI-compatible coordinate strings with proper 121-point resampling f
                 "trail_length": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 1.0, "step": 0.01}),
                 "rotation_speed": ("FLOAT", {"default": 0.0, "min": -360.0, "max": 360.0, "step": 1.0}),
                 "border_width": ("INT", {"default": 0, "min": 0, "max": 20, "step": 1}),
+                "split_output": ("BOOLEAN", {"default": False}),
+                "split_point": ("INT", {"default": 60, "min": 1, "max": 500, "step": 1}),
                 "border_color": ("STRING", {"default": 'white'}),
                 "paths_data": ("STRING", {"default": '{"paths": [], "canvas_size": {"width": 512, "height": 512}}', "multiline": True}),
             }
@@ -266,7 +321,8 @@ Outputs WAN ATI-compatible coordinate strings with proper 121-point resampling f
     def animate_paths(self, frame_width, frame_height, frame_count, shape, shape_size,
                      shape_color, bg_color, blur_radius=0.0, trail_length=0.0,
                      rotation_speed=0.0, border_width=0, border_color='white',
-                     paths_data='{"paths": [], "canvas_size": {"width": 512, "height": 512}}'):
+                     paths_data='{"paths": [], "canvas_size": {"width": 512, "height": 512}}',
+                     split_output=False, split_point=60):
 
         # Parse colors
         shape_color = parse_color(shape_color)
@@ -330,6 +386,7 @@ Outputs WAN ATI-compatible coordinate strings with proper 121-point resampling f
                 end_time = path.get('endTime', 1.0)
                 interpolation = path.get('interpolation', 'linear')
                 visibility_mode = path.get('visibilityMode', 'pop')
+                bezier_points = path.get('bezierPoints', None)
 
                 # Determine if shape should be visible and animated
                 is_in_timeline = start_time <= global_t <= end_time
@@ -343,7 +400,7 @@ Outputs WAN ATI-compatible coordinate strings with proper 121-point resampling f
                 if is_in_timeline and end_time > start_time:
                     # Animate within timeline
                     local_t = (global_t - start_time) / (end_time - start_time)
-                    eased_t = apply_interpolation(local_t, interpolation)
+                    eased_t = apply_interpolation(local_t, interpolation, bezier_points)
                     x, y = self.interpolate_path(points, eased_t)
                     # Calculate rotation based on local time
                     current_rotation = rotation_speed * eased_t * 360.0
@@ -396,28 +453,101 @@ Outputs WAN ATI-compatible coordinate strings with proper 121-point resampling f
         # SOLUTION 2 & 3: Generate WAN ATI-compatible coordinate string
         # Resample each path to exactly 121 points with visibility flags
         coord_tracks = []
+        num_samples = 121
         for path in scaled_paths:
             points = path.get('points', [])
-
+            
             # Check if this is a single-point path (static anchor)
             is_single_point = path.get('isSinglePoint', False) or len(points) == 1
+            
+            if is_single_point:
+                # Single point - static for all frames
+                p = points[0]
+                track_coords = [{"x": int(round(p["x"])), "y": int(round(p["y"]))} for _ in range(num_samples)]
+                coord_tracks.append(track_coords)
+                continue
 
-            # Resample to exactly 121 points for WAN ATI compatibility
-            resampled_points = self.resample_path_uniform(points, num_samples=121)
-
-            # Add visibility flag (1.0 = visible, required by WAN ATI)
-            # Format: [{"x": x, "y": y}, {"x": x, "y": y}, ...]
-            # The visibility will be added as a third coordinate when processed by ATI
-            track_coords = [
-                {"x": int(round(p["x"])), "y": int(round(p["y"]))}
-                for p in resampled_points
-            ]
+            # Get timeline parameters for time-based sampling
+            start_time = path.get('startTime', 0.0)
+            end_time = path.get('endTime', 1.0)
+            interpolation = path.get('interpolation', 'linear')
+            visibility_mode = path.get('visibilityMode', 'pop')
+            bezier_points = path.get('bezierPoints', None)
+            
+            track_coords = []
+            
+            # Sample exactly num_samples points over time t=0.0 to 1.0
+            for i in range(num_samples):
+                global_t = i / max(num_samples - 1, 1)
+                
+                # Default position logic (similar to animate_paths loop)
+                is_in_timeline = start_time <= global_t <= end_time
+                
+                if is_in_timeline and end_time > start_time:
+                    # Animate within timeline
+                    local_t = (global_t - start_time) / (end_time - start_time)
+                    eased_t = apply_interpolation(local_t, interpolation, bezier_points)
+                    x, y = self.interpolate_path(points, eased_t)
+                elif visibility_mode == 'static':
+                    # Static mode: show at start or end position when outside timeline
+                    if global_t < start_time:
+                        x, y = self.interpolate_path(points, 0.0)
+                    else:
+                        x, y = self.interpolate_path(points, 1.0)
+                else:
+                    # Pop mode or fallback: for coordinates, we must provide a point.
+                    # We'll stick to start/end points but they won't be "visible" in the mask output.
+                    # For WanVideo trajectories, holding the start/end point is usually the correct behavior
+                    # even if the object "pops" in visually.
+                    if global_t < start_time:
+                        x, y = self.interpolate_path(points, 0.0)
+                    else:
+                        x, y = self.interpolate_path(points, 1.0)
+                
+                track_coords.append({"x": int(round(x)), "y": int(round(y))})
 
             coord_tracks.append(track_coords)
 
         # Output as list of tracks (each track is a list of 121 {x, y} points)
         coord_string = json.dumps(coord_tracks)
 
-        print(f"FL_PathAnimator: Generated {len(coord_tracks)} tracks with 121 points each for WAN ATI")
+        # Split coordinates if enabled
+        if split_output and len(coord_tracks) > 0:
+            # Validate split_point is an integer frame number (handle cached/unexpected values)
+            try:
+                split_index = int(split_point) if not isinstance(split_point, int) else split_point
+            except (ValueError, TypeError):
+                print(f"FL_PathAnimator: Invalid split_point value '{split_point}', using default 60")
+                split_index = 60
+            
+            # Clamp split_index to valid range (num_samples=121)
+            num_samples = 121
+            split_index = max(1, min(num_samples - 1, split_index))
+            
+            # Split each track temporally
+            coord_part1 = []
+            coord_part2 = []
+            
+            for track in coord_tracks:
+                coord_part1.append(track[:split_index])
+                coord_part2.append(track[split_index:])
+            
+            coord_string_part1 = json.dumps(coord_part1)
+            coord_string_part2 = json.dumps(coord_part2)
+            
+            # Generate reversed lists (reverse time/points in each track)
+            coord_part1_reversed = [track[::-1] for track in coord_part1]
+            coord_part2_reversed = [track[::-1] for track in coord_part2]
+            coord_string_part1_reversed = json.dumps(coord_part1_reversed)
+            coord_string_part2_reversed = json.dumps(coord_part2_reversed)
+            
+            print(f"FL_PathAnimator: Generated {len(coord_tracks)} tracks, split temporally at index {split_index} -> Part1: {split_index} points, Part2: {num_samples - split_index} points")
+        else:
+            # No split - return empty strings for part1 and part2
+            coord_string_part1 = "[]"
+            coord_string_part2 = "[]"
+            coord_string_part1_reversed = "[]"
+            coord_string_part2_reversed = "[]"
+            print(f"FL_PathAnimator: Generated {len(coord_tracks)} tracks with 121 points each for WAN ATI")
 
-        return (out_images, out_masks, coord_string)
+        return (out_images, out_masks, coord_string, coord_string_part1, coord_string_part2, coord_string_part1_reversed, coord_string_part2_reversed)

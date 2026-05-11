@@ -63,14 +63,16 @@ app.registerExtension({
             // Initialize cached background image storage on the widget
             pathsDataWidget._cachedBackgroundImage = null;
 
-            // Add "Edit Paths" button
+            // Add "Edit Paths" button (not serialized)
             const editButton = node.addWidget("button", "Edit Paths", null, () => {
                 openPathEditor(node, pathsDataWidget);
             });
+            editButton.serialize = false;
 
-            // Add path count display (readonly)
+            // Add path count display (readonly, not serialized to avoid value conflicts)
             const pathCountWidget = node.addWidget("text", "Path Count", "0 paths", null);
             pathCountWidget.disabled = true;
+            pathCountWidget.serialize = false;
 
             // Update path count when paths change
             function updatePathCount() {
@@ -1519,7 +1521,8 @@ class PathEditorModal {
             { value: 'linear', label: 'Linear' },
             { value: 'ease-in', label: 'Ease In' },
             { value: 'ease-out', label: 'Ease Out' },
-            { value: 'ease-in-out', label: 'Ease In-Out' }
+            { value: 'ease-in-out', label: 'Ease In-Out' },
+            { value: 'custom', label: 'Custom (Cubic Bezier)' }
         ];
 
         interpolationTypes.forEach(type => {
@@ -1530,14 +1533,257 @@ class PathEditorModal {
             interpSelect.appendChild(option);
         });
 
+        // Initialize bezier points if not present
+        if (!path.bezierPoints) {
+            path.bezierPoints = [0.42, 0.0, 0.58, 1.0]; // Default ease-in-out ish
+        }
+
+        // Container for bezier controls
+        const bezierContainer = document.createElement('div');
+        bezierContainer.style.cssText = `
+            display: ${(path.interpolation === 'custom') ? 'flex' : 'none'};
+            flex-direction: column;
+            gap: 8px;
+            margin-top: 4px;
+            padding: 8px;
+            background: rgba(0, 0, 0, 0.2);
+            border-radius: 4px;
+        `;
+
+        // Create canvas for visual editor
+        const canvas = document.createElement('canvas');
+        canvas.width = 150;
+        canvas.height = 150;
+        canvas.style.cssText = `
+            width: 100%;
+            height: 150px;
+            background: #2a2a2a;
+            border-radius: 4px;
+            margin-bottom: 8px;
+            cursor: pointer;
+        `;
+        bezierContainer.appendChild(canvas);
+
+        const ctx = canvas.getContext('2d');
+        let activeHandle = null;
+
+        const drawCurve = () => {
+            const w = canvas.width;
+            const h = canvas.height;
+            const pad = 20;
+            const uw = w - pad * 2;
+            const uh = h - pad * 2;
+
+            // Clear
+            ctx.clearRect(0, 0, w, h);
+
+            // Grid / Background
+            ctx.strokeStyle = '#333';
+            ctx.lineWidth = 1;
+            ctx.beginPath();
+            ctx.moveTo(pad, pad); ctx.lineTo(pad, h - pad); ctx.lineTo(w - pad, h - pad);
+            ctx.stroke();
+
+            // Diagonal (Linear ref)
+            ctx.strokeStyle = '#444';
+            ctx.setLineDash([2, 4]);
+            ctx.beginPath();
+            ctx.moveTo(pad, h - pad);
+            ctx.lineTo(w - pad, pad);
+            ctx.stroke();
+            ctx.setLineDash([]);
+
+            // Bezier Curve
+            const p0 = { x: pad, y: h - pad };
+            const p3 = { x: w - pad, y: pad };
+            const p1 = { x: pad + path.bezierPoints[0] * uw, y: h - pad - path.bezierPoints[1] * uh };
+            const p2 = { x: pad + path.bezierPoints[2] * uw, y: h - pad - path.bezierPoints[3] * uh };
+
+            ctx.strokeStyle = '#4ECDC4';
+            ctx.lineWidth = 2;
+            ctx.beginPath();
+            ctx.moveTo(p0.x, p0.y);
+            ctx.bezierCurveTo(p1.x, p1.y, p2.x, p2.y, p3.x, p3.y);
+            ctx.stroke();
+
+            // Handles
+            ctx.strokeStyle = '#888';
+            ctx.lineWidth = 1;
+            ctx.beginPath();
+            ctx.moveTo(p0.x, p0.y); ctx.lineTo(p1.x, p1.y);
+            ctx.moveTo(p3.x, p3.y); ctx.lineTo(p2.x, p2.y);
+            ctx.stroke();
+
+            // Points
+            const drawPoint = (p, color, label) => {
+                ctx.fillStyle = color;
+                ctx.beginPath();
+                ctx.arc(p.x, p.y, 4, 0, Math.PI * 2);
+                ctx.fill();
+            };
+
+            drawPoint(p1, '#FF6B6B', '1'); // Handle 1
+            drawPoint(p2, '#FFE66D', '2'); // Handle 2
+        };
+
+        // Slider update logic needs to trigger draw
+        const updateFromSliders = () => {
+            drawCurve();
+            this.savePaths();
+        };
+
+        // Function to create a bezier slider
+        const createBezierSlider = (label, index, updateCallback) => {
+            const sliderRow = document.createElement('div');
+            sliderRow.style.cssText = `
+                display: flex;
+                align-items: center;
+                gap: 8px;
+            `;
+
+            const labelEl = document.createElement('span');
+            labelEl.textContent = label;
+            labelEl.style.cssText = `
+                color: #aaa;
+                font-size: 10px;
+                width: 20px;
+            `;
+
+            const slider = document.createElement('input');
+            slider.type = 'range';
+            slider.min = 0;
+            slider.max = 100;
+            slider.value = path.bezierPoints[index] * 100;
+            slider.style.cssText = `
+                flex: 1;
+                height: 4px;
+                accent-color: #4ECDC4;
+            `;
+
+            const valDisplay = document.createElement('span');
+            valDisplay.textContent = path.bezierPoints[index].toFixed(2);
+            valDisplay.style.cssText = `
+                color: #fff;
+                font-size: 10px;
+                width: 25px;
+                text-align: right;
+            `;
+
+            // Assign to object so we can update it externally
+            sliderRow.input = slider;
+            sliderRow.display = valDisplay;
+
+            slider.oninput = (e) => {
+                const val = parseInt(e.target.value) / 100;
+                path.bezierPoints[index] = val;
+                valDisplay.textContent = val.toFixed(2);
+                updateCallback();
+            };
+
+            sliderRow.appendChild(labelEl);
+            sliderRow.appendChild(slider);
+            sliderRow.appendChild(valDisplay);
+            return sliderRow;
+        };
+
+        const sliderX1 = createBezierSlider('X1', 0, updateFromSliders);
+        const sliderY1 = createBezierSlider('Y1', 1, updateFromSliders);
+        const sliderX2 = createBezierSlider('X2', 2, updateFromSliders);
+        const sliderY2 = createBezierSlider('Y2', 3, updateFromSliders);
+
+        bezierContainer.appendChild(sliderX1);
+        bezierContainer.appendChild(sliderY1);
+        bezierContainer.appendChild(sliderX2);
+        bezierContainer.appendChild(sliderY2);
+
+        // Initial draw
+        setTimeout(drawCurve, 10); // Delay slightly to ensure layout
+
+        // Canvas Interaction
+        const getMousePos = (e) => {
+            const rect = canvas.getBoundingClientRect();
+            return {
+                x: e.clientX - rect.left,
+                y: e.clientY - rect.top
+            };
+        };
+
+        canvas.onmousedown = (e) => {
+            const m = getMousePos(e);
+
+            const w = canvas.width;
+            const h = canvas.height;
+            const pad = 20;
+            const uw = w - pad * 2;
+            const uh = h - pad * 2;
+
+            const p1 = { x: pad + path.bezierPoints[0] * uw, y: h - pad - path.bezierPoints[1] * uh };
+            const p2 = { x: pad + path.bezierPoints[2] * uw, y: h - pad - path.bezierPoints[3] * uh };
+
+            const dist = (p, m) => Math.sqrt(Math.pow(p.x - m.x, 2) + Math.pow(p.y - m.y, 2));
+
+            if (dist(p1, m) < 10) activeHandle = 1;
+            else if (dist(p2, m) < 10) activeHandle = 2;
+        };
+
+        window.addEventListener('mousemove', (e) => {
+            if (activeHandle) {
+                const rect = canvas.getBoundingClientRect();
+                const m = {
+                    x: Math.max(0, Math.min(rect.width, e.clientX - rect.left)),
+                    y: Math.max(0, Math.min(rect.height, e.clientY - rect.top))
+                };
+
+                const w = canvas.width;
+                const h = canvas.height;
+                const pad = 20;
+                const uw = w - pad * 2;
+                const uh = h - pad * 2;
+
+                let nx = (m.x - pad) / uw;
+                let ny = (h - pad - m.y) / uh;
+
+                nx = Math.max(0, Math.min(1, nx));
+                // ny can go outside 0-1 for elastic effects usually, but let's clamp for standard ease
+                // actually standard bezier editor allows y outside 0-1.
+                // But ComfyUI implementation of solve_cubic_bezier might assume 0-1 range logic or handle it.
+                // Let's clamp for safety for now unless user asks.
+                ny = Math.max(0, Math.min(1, ny));
+
+                if (activeHandle === 1) {
+                    path.bezierPoints[0] = nx;
+                    path.bezierPoints[1] = ny;
+                    sliderX1.input.value = nx * 100; sliderX1.display.textContent = nx.toFixed(2);
+                    sliderY1.input.value = ny * 100; sliderY1.display.textContent = ny.toFixed(2);
+                } else if (activeHandle === 2) {
+                    path.bezierPoints[2] = nx;
+                    path.bezierPoints[3] = ny;
+                    sliderX2.input.value = nx * 100; sliderX2.display.textContent = nx.toFixed(2);
+                    sliderY2.input.value = ny * 100; sliderY2.display.textContent = ny.toFixed(2);
+                }
+
+                drawCurve();
+            }
+        });
+
+        window.addEventListener('mouseup', () => {
+            if (activeHandle) {
+                activeHandle = null;
+                this.savePaths();
+            }
+        });
+
         interpSelect.onchange = (e) => {
             e.stopPropagation();
             path.interpolation = e.target.value;
+            // Show/hide bezier controls
+            bezierContainer.style.display = (path.interpolation === 'custom') ? 'flex' : 'none';
             this.savePaths();
         };
 
         interpolationSection.appendChild(interpLabel);
         interpolationSection.appendChild(interpSelect);
+        interpolationSection.appendChild(bezierContainer);
 
         // Visibility Mode Dropdown
         const visibilitySection = document.createElement('div');
